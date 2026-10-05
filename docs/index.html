@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Device control</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --fg:#eceff4; --mute:#8b93a5; --acc:#4f8cff; --red:#ff5d5d; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--fg);
+    font: 16px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 480px; margin: 0 auto; padding: max(20px, env(safe-area-inset-top)) 16px max(20px, env(safe-area-inset-bottom)); }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin-bottom:14px; }
+  label { display:block; color:var(--mute); font-size:13px; margin-bottom:6px; }
+  input[type=text] { width:100%; padding:12px; border-radius:10px; border:1px solid #2a2f3a;
+    background:#0f1115; color:var(--fg); font-size:16px; }
+  input[type=range] { width:100%; accent-color: var(--acc); }
+  .row { display:flex; justify-content:space-between; align-items:center; }
+  .big { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:6px; }
+  button { border:0; border-radius:16px; padding:22px 10px; font-size:18px; font-weight:600;
+    color:#fff; background:var(--acc); cursor:pointer; }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity:.5; }
+  #stop { grid-column: 1 / -1; background: var(--red); padding:18px; }
+  #status { color:var(--mute); font-size:14px; min-height:20px; text-align:center; margin-top:10px; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { padding:9px 0; border-top:1px solid #232834; font-size:15px; }
+  li:first-child { border-top:0; }
+  li small { color:var(--mute); margin-right:8px; }
+  .hint { color:var(--mute); font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>⚙️ Device control</h1>
+
+  <div id="nosecret" class="card hint" hidden>
+    Incomplete link. Open the full link you were given
+    (il se termine par <code>#s=…</code>).
+  </div>
+
+  <div id="app" hidden>
+    <div class="card">
+      <label for="who">Name</label>
+      <input id="who" type="text" maxlength="20" placeholder="Anonymous" autocomplete="nickname">
+    </div>
+
+    <div class="card">
+      <div class="row"><label for="secs" style="margin:0">Duration</label><strong id="secsVal">5 s</strong></div>
+      <input id="secs" type="range" min="1" max="20" value="5">
+      <div class="big">
+        <button id="up">▲ Up</button>
+        <button id="down">▼ Down</button>
+        <button id="stop">■ Stop</button>
+      </div>
+      <div id="status"></div>
+    </div>
+
+    <div class="card">
+      <label>Activity (24 h)</label>
+      <ul id="log"><li class="hint">Nothing yet.</li></ul>
+    </div>
+  </div>
+</main>
+
+<script>
+const NTFY = "https://ntfy.sh";
+const $ = (s) => document.querySelector(s);
+
+// Le secret vit dans le fragment d'URL (#s=...) : jamais envoyé à GitHub, jamais dans le dépôt.
+let secret = "";
+try { secret = localStorage.getItem("esp_secret") || ""; } catch (e) {}
+const frag = new URLSearchParams(location.hash.slice(1));
+if (frag.get("s")) {
+  secret = frag.get("s");
+  try { localStorage.setItem("esp_secret", secret); } catch (e) {}
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
+if (!/^[A-Za-z0-9_-]{8,48}$/.test(secret)) {
+  $("#nosecret").hidden = false;
+} else {
+  $("#app").hidden = false;
+  start();
+}
+
+function start() {
+  const CMD_TOPIC = "esp-" + secret;
+  const LOG_TOPIC = "esp-" + secret + "-log";
+
+  const who = $("#who"), secs = $("#secs"), statusEl = $("#status");
+  try { who.value = localStorage.getItem("esp_who") || ""; } catch (e) {}
+  secs.addEventListener("input", () => { $("#secsVal").textContent = secs.value + " s"; });
+
+  let busy = false;
+  async function send(cmd) {
+    if (busy) return;
+    busy = true;
+    document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const name = (who.value || "").trim() || "Anonymous";
+    try { localStorage.setItem("esp_who", name); } catch (e) {}
+    const arg = cmd === "stop" ? "" : secs.value;
+    statusEl.textContent = "Sending…";
+    try {
+      const r = await fetch(`${NTFY}/${CMD_TOPIC}`, { method: "POST", body: `${name}|${cmd}|${arg}` });
+      statusEl.textContent = r.ok ? "Sent ✓" : "Error " + r.status;
+    } catch (e) {
+      statusEl.textContent = "Network unavailable";
+    }
+    setTimeout(() => {
+      busy = false;
+      document.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }, 800);
+  }
+  $("#up").onclick = () => send("up");
+  $("#down").onclick = () => send("down");
+  $("#stop").onclick = () => send("stop");
+
+  // ----- journal en direct (le boîtier publie chaque action sur LOG_TOPIC) -----
+  const seen = new Set();
+  const list = $("#log");
+  function addLine(m) {
+    if (m.event !== "message" || seen.has(m.id)) return;
+    seen.add(m.id);
+    if (list.querySelector(".hint")) list.innerHTML = "";
+    const li = document.createElement("li");
+    const t = document.createElement("small");
+    t.textContent = new Date(m.time * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    li.append(t, document.createTextNode(m.message));
+    list.prepend(li);
+    while (list.children.length > 50) list.lastChild.remove();
+  }
+
+  (async () => {
+    try {
+      const r = await fetch(`${NTFY}/${LOG_TOPIC}/json?poll=1&since=24h`);
+      (await r.text()).split("\n").filter(Boolean).forEach((l) => { try { addLine(JSON.parse(l)); } catch (e) {} });
+    } catch (e) {}
+    const es = new EventSource(`${NTFY}/${LOG_TOPIC}/sse`);
+    es.onmessage = (e) => { try { addLine(JSON.parse(e.data)); } catch (err) {} };
+  })();
+}
+</script>
+</body>
+</html>
